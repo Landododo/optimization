@@ -1,0 +1,8 @@
+osmnx
+networkx
+shapely>=2.0
+numpy
+matplotlib
+highspy
+pytest
+pulp[cbc]>-4.0
