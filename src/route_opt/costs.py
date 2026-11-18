@@ -29,3 +29,12 @@ def street_cost(elev_u, elev_v, length, alpha=1.0, beta=0.5, gamma=1.0):
     ascent = max(0.0, elev_v - elev_u)
     descent = max(0.0, elev_u - elev_v)
     return alpha * ascent + beta * descent + gamma * length
+
+def edge_climb(G, u, v):
+    """(ascent, descent) in metres for street u->v.
+    Uses edge attributes from the DEM pipeline if present; otherwise node elevations."""
+    d = G.edges[u, v]
+    if "ascent" in d and "descent" in d:
+        return d["ascent"], d["descent"]
+    dz = G.nodes[v]["elev"] - G.nodes[u]["elev"]
+    return max(0.0, dz), max(0.0, -dz)

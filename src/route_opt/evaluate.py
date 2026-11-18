@@ -1,5 +1,6 @@
 """Independent cost evaluation for a closed route."""
 from dataclasses import dataclass
+from route_opt.costs import edge_climb   # add to the imports
 
 
 @dataclass
@@ -23,9 +24,9 @@ def route_stats(G, route, cfg):
     length = asc = desc = scost = 0.0
     for u, v in zip(route[:-1], route[1:]):
         length += G.edges[u, v]["length"]
-        dz = G.nodes[v]["elev"] - G.nodes[u]["elev"]
-        asc += max(0.0, dz)
-        desc += max(0.0, -dz)
+        a, d = edge_climb(G, u, v)
+        asc += a
+        desc += d
         scost += cfg.street_cost(G, u, v)
 
     # Cyclic turns: includes the turn at the start/finish node.

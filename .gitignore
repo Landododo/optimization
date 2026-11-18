@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Test and tool caches
+.pytest_cache/
+.coverage
+htmlcov/
+.ipynb_checkpoints/
+
+# Data: large files that each person downloads or builds locally
+data/
+*.tif
+*.tiff
+*.pkl
+*.graphml
+*.gpkg
+*.zip
+
+# OSMnx cache (created in the working directory by default)
+cache/
+
+# Generated output
+output/
+
+# Secrets and local settings
+.env
+*.key
+
+# macOS and editors
+.DS_Store
+.vscode/
+.idea/

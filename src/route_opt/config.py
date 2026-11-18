@@ -28,10 +28,8 @@ class RouteConfig:
     intersections_once: bool = False   # True = each intersection at most once
 
     def street_cost(self, G, u, v):
-        return costs.street_cost(
-            G.nodes[u]["elev"], G.nodes[v]["elev"], G.edges[u, v]["length"],
-            alpha=self.alpha, beta=self.beta, gamma=self.gamma,
-        )
+        asc, desc = costs.edge_climb(G, u, v)
+        return self.alpha * asc + self.beta * desc + self.gamma * G.edges[u, v]["length"]
 
     def turn_cost(self, G, u, v, w):
         theta = costs.turn_angle_deg(

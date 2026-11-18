@@ -5,4 +5,7 @@ numpy
 matplotlib
 highspy
 pytest
-pulp[cbc]>-4.0
+pulp[cbd]>=4.0
+rasterio
+py3dep
+rioxarray
