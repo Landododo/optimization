@@ -18,7 +18,10 @@ import rasterio
 import shapely
 from pyproj import Transformer
 from shapely.geometry import LineString, box
-
+from route_opt.costs import heading_deg, turn_angle_deg
+import time
+import random
+import requests
 
 @dataclass(frozen=True)
 class Region:
@@ -36,7 +39,7 @@ class Region:
 # Presets. Start with ESPLANADE; the wide box is for later, once solve times are known.
 ESPLANADE = Region(west=-71.09, south=42.345, east=-71.06, north=42.362)
 BOSTON_WIDE = Region(west=-71.12, south=42.34, east=-71.05, north=42.37)
-
+MARATHON = Region(west=-71.16, south=42.31, east=-71.03, north=42.39)
 
 def fetch_dem(region: Region, path, resolution_m: int = 10) -> Path:
     """Download a USGS 3DEP DEM for the region as a GeoTIFF (requires py3dep, rioxarray)."""
@@ -76,14 +79,78 @@ def _sample_dem(dem_path, xy, crs_metric):
         vals[bad] = np.interp(np.flatnonzero(bad), good, vals[good])
     return vals
 
+def _edge_bearings(ls: LineString) -> tuple[float, float]:
+    """Exact departure bearing at start and arrival bearing at end of a LineString."""
+    coords = list(ls.coords)
+    in_b = heading_deg(coords[0], coords[1])
+    out_b = heading_deg(coords[-2], coords[-1])
+    return in_b, out_b
 
-def prepare_graph(G_ll, dem_path, segment_m: float = 25.0, smooth_window: int = 3) -> nx.DiGraph:
+
+def _split_sharp_bends(G: nx.MultiDiGraph, bend_threshold_deg: float = 30.0) -> nx.MultiDiGraph:
+    """Split MultiDiGraph edges at interior LineString vertices with turns > bend_threshold_deg."""
+    H = nx.MultiDiGraph(crs=G.graph["crs"])
+    for n, d in G.nodes(data=True):
+        H.add_node(n, **d, is_intersection=True)
+
+    next_bend_id = 0
+    for u, v, k, d in G.edges(keys=True, data=True):
+        ls: LineString = d["geometry"]
+        coords = list(ls.coords)
+        if len(coords) <= 2 or ls.length < 15.0:
+            in_b, out_b = _edge_bearings(ls)
+            H.add_edge(u, v, geometry=ls, length=ls.length, in_bearing=in_b, out_bearing=out_b, **sub_d)
+            continue
+
+        # Find interior indices where deflection angle exceeds threshold
+        split_idxs = [0]
+        for i in range(1, len(coords) - 1):
+            b_in = heading_deg(coords[i - 1], coords[i])
+            b_out = heading_deg(coords[i], coords[i + 1])
+            if turn_angle_deg(b_in, b_out) > bend_threshold_deg:
+                split_idxs.append(i)
+        split_idxs.append(len(coords) - 1)
+
+        prev_node = u
+        for seg_i in range(len(split_idxs) - 1):
+            i0, i1 = split_idxs[seg_i], split_idxs[seg_i + 1]
+            sub_ls = LineString(coords[i0 : i1 + 1])
+            if seg_i < len(split_idxs) - 2:
+                curr_node = f"bend_{next_bend_id}"
+                next_bend_id += 1
+                bx, by = coords[i1]
+                H.add_node(curr_node, x=bx, y=by, is_intersection=False)
+            else:
+                curr_node = v
+
+            in_b, out_b = _edge_bearings(sub_ls)
+            sub_d = {k_attr: v_attr for k_attr, v_attr in d.items() if k_attr not in ("geometry", "length")}
+            H.add_edge(
+                prev_node,
+                curr_node,
+                geometry=sub_ls,
+                length=sub_ls.length,
+                in_bearing=in_b,
+                out_bearing=out_b,
+                **sub_d,
+            )
+            prev_node = curr_node
+
+    return H
+
+def prepare_graph(
+    G_ll,
+    dem_path,
+    segment_m: float = 25.0,
+    smooth_window: int = 3,
+    bend_threshold_deg: float = 30.0,
+) -> nx.DiGraph:
     """Turn an OSMnx lon/lat MultiDiGraph into a solver-ready DiGraph."""
     G_ll = ox.truncate.largest_component(G_ll, strongly=True)
     G = ox.project_graph(G_ll)            # metres (UTM)
     crs_m = G.graph["crs"]
 
-    # Every edge needs geometry in metres (straight line if OSM gave none)
+    # 1. Every edge needs geometry in metres (straight line if OSM gave none)
     for u, v, k, d in G.edges(keys=True, data=True):
         if "geometry" not in d:
             d["geometry"] = LineString([
@@ -92,7 +159,10 @@ def prepare_graph(G_ll, dem_path, segment_m: float = 25.0, smooth_window: int = 
             ])
         d["length"] = d["geometry"].length
 
-    # Densify each edge, then sample every point in one batch
+    # 2. Split edges at sharp mid-street bends before elevation sampling
+    G = _split_sharp_bends(G, bend_threshold_deg=bend_threshold_deg)
+
+    # 3. Densify each sub-segment, then sample every point in one batch
     node_order = list(G.nodes)
     node_xy = np.array([[G.nodes[n]["x"], G.nodes[n]["y"]] for n in node_order])
     dense, chunks = {}, [node_xy]
@@ -107,34 +177,97 @@ def prepare_graph(G_ll, dem_path, segment_m: float = 25.0, smooth_window: int = 
     climb = {}
     for key, coords in dense.items():
         m = len(coords)
-        z = _smooth(z_all[pos: pos + m], smooth_window)
+        z = _smooth(z_all[pos : pos + m], smooth_window)
         pos += m
         dz = np.diff(z)
         climb[key] = (float(dz[dz > 0].sum()), float(-dz[dz < 0].sum()))
 
-    # Build the solver graph
+    # 4. Inverse-project UTM coordinates so synthetic bend nodes also get lon/lat
+    to_ll = Transformer.from_crs(crs_m, "EPSG:4326", always_xy=True)
+    node_lons, node_lats = to_ll.transform(node_xy[:, 0], node_xy[:, 1])
+
+    # 5. Build the solver graph with bearings and intersection flags
     D = nx.DiGraph()
-    for n in node_order:
+    for idx, n in enumerate(node_order):
         d = G.nodes[n]
+        if n in G_ll.nodes:
+            lon, lat = G_ll.nodes[n]["x"], G_ll.nodes[n]["y"]
+        else:
+            lon, lat = float(node_lons[idx]), float(node_lats[idx])
         D.add_node(
-            n, x=d["x"], y=d["y"], elev=float(node_z[n]),
-            lon=G_ll.nodes[n]["x"], lat=G_ll.nodes[n]["y"],
+            n,
+            x=d["x"],
+            y=d["y"],
+            elev=float(node_z[n]),
+            lon=lon,
+            lat=lat,
+            is_intersection=d.get("is_intersection", True),
         )
+
     for u, v, k, d in G.edges(keys=True, data=True):
         if D.has_edge(u, v) and D[u][v]["length"] <= d["length"]:
             continue                       # keep the shorter parallel edge
         asc, desc = climb[(u, v, k)]
-        D.add_edge(u, v, length=float(d["length"]), ascent=asc, descent=desc,
-                   geometry=d["geometry"])
+        D.add_edge(
+            u,
+            v,
+            length=float(d["length"]),
+            ascent=asc,
+            descent=desc,
+            in_bearing=float(d["in_bearing"]),
+            out_bearing=float(d["out_bearing"]),
+            geometry=d["geometry"],
+        )
     return D
 
+def _download_osm_with_backoff(
+    bbox: tuple[float, float, float, float],
+    network_type: str,
+    max_retries: int = 6,
+    base_delay_s: float = 5.0,
+) -> nx.MultiDiGraph:
+    """Download an OSMnx graph with exponential backoff on 502/504/429 server errors."""
+    ox.settings.use_cache = True
+    ox.settings.requests_timeout = 300  # allow up to 5 min for large bounding boxes
 
-def build_region_graph(region: Region, dem_path, network_type: str = "walk",
-                       segment_m: float = 25.0) -> nx.DiGraph:
-    """Download streets for the region and build the solver graph."""
-    G_ll = ox.graph_from_bbox(bbox=region.bbox, network_type=network_type, simplify=True)
-    return prepare_graph(G_ll, dem_path, segment_m=segment_m)
+    for attempt in range(max_retries):
+        try:
+            return ox.graph_from_bbox(bbox=bbox, network_type=network_type, simplify=True)
+        except (ox._errors.ResponseStatusCodeError, requests.exceptions.RequestException) as err:
+            if attempt == max_retries - 1:
+                raise
+            # Exponential backoff: 5s, 10s, 20s, 40s, 80s... plus random jitter
+            wait_s = base_delay_s * (2 ** attempt) + random.uniform(0.5, 2.5)
+            print(
+                f"[Overpass busy] Attempt {attempt + 1}/{max_retries} failed ({type(err).__name__}). "
+                f"Retrying in {wait_s:.1f}s...",
+                flush=True,
+            )
+            time.sleep(wait_s)
 
+
+def build_region_graph(
+    region: Region,
+    dem_path,
+    network_type: str = "walk",
+    segment_m: float = 25.0,
+    bend_threshold_deg: float = 30.0,
+    raw_cache_path: Path | str | None = None,
+) -> nx.DiGraph:
+    """Download streets for the region (with retry & local caching) and build the solver graph."""
+    if raw_cache_path is not None and Path(raw_cache_path).exists():
+        print(f"Loading cached raw OSM graph from {raw_cache_path}...", flush=True)
+        G_ll = ox.load_graphml(raw_cache_path)
+    else:
+        G_ll = _download_osm_with_backoff(region.bbox, network_type=network_type)
+        if raw_cache_path is not None:
+            Path(raw_cache_path).parent.mkdir(parents=True, exist_ok=True)
+            ox.save_graphml(G_ll, raw_cache_path)
+            print(f"Cached raw OSM graph to {raw_cache_path}", flush=True)
+
+    return prepare_graph(
+        G_ll, dem_path, segment_m=segment_m, bend_threshold_deg=bend_threshold_deg
+    )
 
 def nearest_node(D: nx.DiGraph, lon: float, lat: float):
     """Closest node to a lon/lat point (brute force, fine for a few thousand nodes)."""

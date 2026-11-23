@@ -2,38 +2,37 @@
 import networkx as nx
 
 from route_opt.costs import heading_deg, turn_angle_deg, turn_penalty, street_cost
+import networkx as nx
+from route_opt.config import RouteConfig
 
 START, END = ("__start__",), ("__end__",)
 
 
-def build_line_graph(G, turn_kwargs=None, street_kwargs=None):
+def build_line_graph(G: nx.DiGraph, cfg: RouteConfig) -> nx.DiGraph:
     """
-    G: nx.DiGraph with node attrs x, y, elev and edge attr length.
-    Line graph nodes are directed streets (u, v). Arc (i, j) exists for
-    i = (u, v), j = (v, w) with w != u (no U-turns). Arc weight is the
-    turn penalty plus the cost of the street being entered.
+    Nodes in L are directed street segments e = (u, v) from G.
+    Directed arcs ((u, v), (v, w)) represent valid transitions at node v (w != u).
     """
-    turn_kwargs = turn_kwargs or {}
-    street_kwargs = street_kwargs or {}
-
-    def pos(n):
-        return (G.nodes[n]["x"], G.nodes[n]["y"])
-
     L = nx.DiGraph()
-    for u, v in G.edges:
-        cost = street_cost(
-            G.nodes[u]["elev"], G.nodes[v]["elev"], G.edges[u, v]["length"], **street_kwargs
+    for u, v, d in G.edges(data=True):
+        L.add_node(
+            (u, v),
+            cost=cfg.street_cost(G, u, v),
+            length=float(d["length"]),
         )
-        L.add_node((u, v), cost=cost)
 
     for v in G.nodes:
         for u in G.predecessors(v):
             for w in G.successors(v):
                 if w == u:
                     continue
-                theta = turn_angle_deg(heading_deg(pos(u), pos(v)), heading_deg(pos(v), pos(w)))
-                pen = turn_penalty(theta, **turn_kwargs)
-                L.add_edge((u, v), (v, w), turn=pen, weight=pen + L.nodes[(v, w)]["cost"])
+                pen = cfg.turn_cost(G, u, v, w)
+                L.add_edge(
+                    (u, v),
+                    (v, w),
+                    turn=pen,
+                    weight=pen + L.nodes[(v, w)]["cost"],
+                )
     return L
 
 

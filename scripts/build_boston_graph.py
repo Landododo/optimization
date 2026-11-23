@@ -11,12 +11,10 @@ from pathlib import Path
 from route_opt.boston import Region
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-
-from route_opt.boston import (  # noqa: E402
-    BOSTON_WIDE, ESPLANADE, build_region_graph, fetch_dem, save_graph, summarize,
-)
+from route_opt.boston import BOSTON_WIDE, ESPLANADE, MARATHON, build_region_graph, fetch_dem, save_graph, summarize
 SMALL = Region(west=-71.082, south=42.352, east=-71.068, north=42.360)
-REGIONS = {"small": SMALL, "esplanade": ESPLANADE, "wide": BOSTON_WIDE}
+
+REGIONS = {"small": SMALL, "esplanade": ESPLANADE, "wide": BOSTON_WIDE, "marathon": MARATHON}
 
 p = argparse.ArgumentParser()
 p.add_argument("--region", choices=REGIONS, default="esplanade")
@@ -30,7 +28,14 @@ data = ROOT / "data"
 dem = Path(args.dem) if args.dem else fetch_dem(region, data / f"{args.region}_dem.tif")
 print(f"DEM: {dem}")
 
-D = build_region_graph(region, dem, network_type=args.network, segment_m=args.segment_m)
+raw_cache = data / f"raw_{args.region}_{args.network}.graphml"
+D = build_region_graph(
+    region,
+    dem,
+    network_type=args.network,
+    segment_m=args.segment_m,
+    raw_cache_path=raw_cache,
+)
 out = data / f"{args.region}_{args.network}.pkl"
 save_graph(D, out)
 
