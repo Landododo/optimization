@@ -1,27 +1,22 @@
 """Solve a closed loop on the cached Boston graph and plot it.
 
-Usage: python scripts/solve_boston_loop.py [--region esplanade] [--km 5]
+Usage: python -u scripts/solve_boston_loop.py [--region marathon] [--km 42.195]
 """
 import argparse
-import sys
-from pathlib import Path
-from route_opt.quick import quick_loop  # noqa: E402
-from route_opt.evaluate import route_stats
-import matplotlib.pyplot as plt
-
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-
-from route_opt.boston import load_graph, nearest_node  # noqa: E402
-from route_opt.config import RouteConfig  # noqa: E402
-from route_opt.solve_milp import solve_loop  # noqa: E402
-from route_opt.viz import plot_route  # noqa: E402
 import logging
 import sys
 import time
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from route_opt.boston import insert_exact_node, load_graph  # noqa: E402
+from route_opt.config import RouteConfig  # noqa: E402
+from route_opt.solve_milp import solve_loop  # noqa: E402
+from route_opt.viz import plot_route  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,9 +31,9 @@ p = argparse.ArgumentParser()
 p.add_argument("--region", default="marathon")
 p.add_argument("--network", default="walk")
 p.add_argument("--km", type=float, default=42.195, help="target loop length")
-p.add_argument("--start-lon", type=float, default=-71.0775)
-p.add_argument("--start-lat", type=float, default=42.3536)
-p.add_argument("--time-limit", type=int, default=0, help="solver seconds (0 = no limit)")
+p.add_argument("--start-lon", type=float, default=-71.07847, help="Boston Marathon finish line lon")
+p.add_argument("--start-lat", type=float, default=42.34962, help="Boston Marathon finish line lat")
+p.add_argument("--time-limit", type=int, default=7200, help="solver seconds (default 2 hours)")
 p.add_argument("--length-penalty", type=float, default=0.0,
                help="cost per metre off target; 0 for a hard window")
 p.add_argument("--quiet", action="store_true", help="hide live HiGHS solver log")
@@ -51,8 +46,8 @@ D = load_graph(pkl_path)
 log.info("Loaded graph (%d nodes, %d edges) in %.2fs",
          D.number_of_nodes(), D.number_of_edges(), time.perf_counter() - t0)
 
-start = nearest_node(D, args.start_lon, args.start_lat)
-log.info("Start node %s at (%.5f, %.5f)", start, D.nodes[start]["lon"], D.nodes[start]["lat"])
+start = insert_exact_node(D, args.start_lon, args.start_lat, node_id="boston_finish")
+log.info("Start/finish node %s at (%.5f, %.5f)", start, D.nodes[start]["lon"], D.nodes[start]["lat"])
 
 cfg = RouteConfig(
     target_length_m=args.km * 1000,

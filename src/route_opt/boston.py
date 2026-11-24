@@ -40,6 +40,99 @@ class Region:
 ESPLANADE = Region(west=-71.09, south=42.345, east=-71.06, north=42.362)
 BOSTON_WIDE = Region(west=-71.12, south=42.34, east=-71.05, north=42.37)
 MARATHON = Region(west=-71.16, south=42.31, east=-71.03, north=42.39)
+# In src/route_opt/boston.py
+from shapely.geometry import LineString, Point, box
+from shapely.ops import substring
+
+
+def insert_exact_node(
+    D: nx.DiGraph,
+    lon: float,
+    lat: float,
+    node_id: str = "boston_finish",
+    crs_m: str = "EPSG:32619",  # UTM Zone 19N (Boston)
+):
+    """Project (lon, lat) onto the closest street edge in D, split that edge, and return node_id."""
+    if node_id in D:
+        return node_id
+
+    to_utm = Transformer.from_crs("EPSG:4326", crs_m, always_xy=True)
+    to_ll = Transformer.from_crs(crs_m, "EPSG:4326", always_xy=True)
+    px, py = to_utm.transform(lon, lat)
+    pt = Point(px, py)
+
+    # Find the closest street segment in the graph
+    best_edge, best_dist = None, float("inf")
+    for u, v, d in D.edges(data=True):
+        dist = d["geometry"].distance(pt)
+        if dist < best_dist:
+            best_dist = dist
+            best_edge = (u, v)
+
+    u, v = best_edge
+    ls: LineString = D.edges[u, v]["geometry"]
+    frac = ls.project(pt, normalized=True)
+
+    # If already within 2% of an endpoint intersection, use that intersection directly
+    if frac <= 0.02:
+        return u
+    if frac >= 0.98:
+        return v
+
+    # Compute exact snapped point on the street centerline
+    ls1 = substring(ls, 0.0, frac, normalized=True)
+    snap_x, snap_y = ls1.coords[-1]
+    snap_lon, snap_lat = to_ll.transform(snap_x, snap_y)
+    snap_elev = (1.0 - frac) * D.nodes[u]["elev"] + frac * D.nodes[v]["elev"]
+
+    D.add_node(
+        node_id,
+        x=float(snap_x),
+        y=float(snap_y),
+        elev=float(snap_elev),
+        lon=float(snap_lon),
+        lat=float(snap_lat),
+        is_intersection=False,
+    )
+
+    def _split_directed_edge(a, b, f):
+        edge_data = dict(D.edges[a, b])
+        edge_ls: LineString = edge_data["geometry"]
+        seg1 = substring(edge_ls, 0.0, f, normalized=True)
+        seg2 = substring(edge_ls, f, 1.0, normalized=True)
+
+        in_b1, out_b1 = _edge_bearings(seg1)
+        in_b2, out_b2 = _edge_bearings(seg2)
+
+        D.remove_edge(a, b)
+        D.add_edge(
+            a,
+            node_id,
+            length=float(seg1.length),
+            ascent=edge_data["ascent"] * f,
+            descent=edge_data["descent"] * f,
+            in_bearing=in_b1,
+            out_bearing=out_b1,
+            geometry=seg1,
+        )
+        D.add_edge(
+            node_id,
+            b,
+            length=float(seg2.length),
+            ascent=edge_data["ascent"] * (1.0 - f),
+            descent=edge_data["descent"] * (1.0 - f),
+            in_bearing=in_b2,
+            out_bearing=out_b2,
+            geometry=seg2,
+        )
+
+    # Split both directions if the street is two-way
+    has_rev = D.has_edge(v, u)
+    _split_directed_edge(u, v, frac)
+    if has_rev:
+        _split_directed_edge(v, u, 1.0 - frac)
+
+    return node_id
 
 def fetch_dem(region: Region, path, resolution_m: int = 10) -> Path:
     """Download a USGS 3DEP DEM for the region as a GeoTIFF (requires py3dep, rioxarray)."""
